@@ -1,0 +1,20 @@
+# ---- Dashboard container (Streamlit) ----
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dashboard dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir streamlit>=1.28.0 plotly>=5.18.0 pandas>=2.1.0
+
+COPY proto/ ./proto/
+COPY client/traffic_logger.py ./client/traffic_logger.py
+COPY client/__init__.py ./client/__init__.py
+COPY dashboard/ ./dashboard/
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "dashboard/app.py", \
+     "--server.address=0.0.0.0", \
+     "--server.port=8501", \
+     "--server.headless=true"]

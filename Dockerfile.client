@@ -1,0 +1,13 @@
+# ---- Client container (Head-unit simulator + attack scripts) ----
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir --upgrade pip
+
+COPY proto/ ./proto/
+COPY client/ ./client/
+COPY attacks/ ./attacks/
+COPY services/ ./services/
+
+CMD ["python", "-m", "client.head_unit"]

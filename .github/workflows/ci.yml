@@ -1,0 +1,83 @@
+name: SOME/IP IDS CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ----- Unit Tests -----
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest numpy pandas xgboost scikit-learn
+
+      - name: Run protocol tests
+        run: python -m pytest tests/test_proto.py -v
+
+      - name: Run detector tests
+        run: python -m pytest tests/test_detector.py -v
+
+  # ----- Docker Build -----
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build service image
+        run: docker build -f Dockerfile.service -t someip-service .
+
+      - name: Build client image
+        run: docker build -f Dockerfile.client -t someip-client .
+
+      - name: Build dashboard image
+        run: docker build -f Dockerfile.dashboard -t someip-dashboard .
+
+  # ----- Integration Test -----
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start services
+        run: |
+          docker compose up -d hvac media navigation client
+          sleep 15
+
+      - name: Check services are running
+        run: |
+          docker compose ps
+          docker compose logs --tail=20
+
+      - name: Verify traffic log
+        run: |
+          # Check that traffic.jsonl has been created and has entries
+          docker compose exec -T client python -c "
+          import json
+          with open('/logs/traffic.jsonl') as f:
+              lines = f.readlines()
+          print(f'Traffic log has {len(lines)} entries')
+          assert len(lines) > 0, 'No traffic recorded!'
+          # Verify schema
+          record = json.loads(lines[0])
+          required = ['timestamp', 'service_id', 'method_id', 'message_type', 'label']
+          for field in required:
+              assert field in record, f'Missing field: {field}'
+          print('Schema OK')
+          "
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

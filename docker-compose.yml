@@ -1,0 +1,171 @@
+# =============================================================================
+# SOME/IP Automotive Intrusion Detection System
+# Docker Compose — Full vehicle network simulation
+# =============================================================================
+#
+# Architecture:
+#   vehicle_net (172.20.0.0/24) bridge network
+#   ├── hvac       (172.20.0.10:30501) — HVAC ECU service
+#   ├── media      (172.20.0.11:30502) — Media ECU service
+#   ├── navigation (172.20.0.12:30503) — Navigation ECU service
+#   ├── client     (172.20.0.20:30600) — Head-unit simulator
+#   ├── detector   (172.20.0.30:5001)  — XGBoost anomaly detector
+#   └── dashboard  (172.20.0.31:8501)  — Streamlit dashboard
+#
+# Usage:
+#   docker compose up              # Start everything
+#   docker compose up --build      # Rebuild + start
+#   docker compose logs -f client  # Follow client logs
+
+services:
+  # ---------- ECU Services ----------
+
+  hvac:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    container_name: someip-hvac
+    command: ["python", "-m", "services.hvac"]
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - PYTHONUNBUFFERED=1
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.10
+    volumes:
+      - logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1); s.sendto(b'ping', ('127.0.0.1', 30501)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  media:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    container_name: someip-media
+    command: ["python", "-m", "services.media"]
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - PYTHONUNBUFFERED=1
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.11
+    volumes:
+      - logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1); s.sendto(b'ping', ('127.0.0.1', 30502)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  navigation:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    container_name: someip-navigation
+    command: ["python", "-m", "services.navigation"]
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - PYTHONUNBUFFERED=1
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.12
+    volumes:
+      - logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1); s.sendto(b'ping', ('127.0.0.1', 30503)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------- Client ----------
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: someip-client
+    command: ["python", "-m", "client.head_unit"]
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - PYTHONUNBUFFERED=1
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.20
+    volumes:
+      - logs:/logs
+    depends_on:
+      hvac:
+        condition: service_started
+      media:
+        condition: service_started
+      navigation:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------- Detector (Stage 5) ----------
+
+  detector:
+    build:
+      context: .
+      dockerfile: Dockerfile.detector
+    container_name: someip-detector
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - PYTHONUNBUFFERED=1
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.30
+    volumes:
+      - logs:/logs
+    ports:
+      - "5001:5001"
+    depends_on:
+      client:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------- Dashboard (Stage 6) ----------
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: someip-dashboard
+    environment:
+      - LOG_PATH=/logs/traffic.jsonl
+      - DETECTOR_URL=http://172.20.0.30:5001
+    networks:
+      vehicle_net:
+        ipv4_address: 172.20.0.31
+    volumes:
+      - logs:/logs
+    ports:
+      - "8501:8501"
+    depends_on:
+      detector:
+        condition: service_started
+    restart: unless-stopped
+
+
+# ---------- Network ----------
+
+networks:
+  vehicle_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
+
+# ---------- Volumes ----------
+
+volumes:
+  logs:
+    driver: local

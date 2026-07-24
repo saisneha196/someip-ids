@@ -1,0 +1,15 @@
+# Core dependencies (shared across all containers)
+# No external SOME/IP library needed — we implement the protocol ourselves
+
+# Detector (Stage 5)
+xgboost>=2.0.0
+scikit-learn>=1.3.0
+pandas>=2.1.0
+numpy>=1.25.0
+
+# Dashboard (Stage 6)
+streamlit>=1.28.0
+plotly>=5.18.0
+
+# Testing
+pytest>=7.4.0

@@ -1,0 +1,21 @@
+# ---- Detector container (XGBoost + Feature Extraction) ----
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install ML dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        xgboost>=2.0.0 \
+        scikit-learn>=1.3.0 \
+        pandas>=2.1.0 \
+        numpy>=1.25.0
+
+COPY proto/ ./proto/
+COPY client/traffic_logger.py ./client/traffic_logger.py
+COPY client/__init__.py ./client/__init__.py
+COPY detector/ ./detector/
+
+EXPOSE 5001
+
+CMD ["python", "-m", "detector.detector"]

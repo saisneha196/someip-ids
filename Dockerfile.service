@@ -1,0 +1,17 @@
+# ---- Service container (HVAC, Media, Navigation) ----
+# Lightweight Python image — no C++ build chain needed
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install only what services need (no ML deps)
+RUN pip install --no-cache-dir --upgrade pip
+
+# Copy the protocol library and service code
+COPY proto/ ./proto/
+COPY client/traffic_logger.py ./client/traffic_logger.py
+COPY client/__init__.py ./client/__init__.py
+COPY services/ ./services/
+
+# Default entrypoint — overridden per service in docker-compose
+CMD ["python", "-m", "services.hvac"]
