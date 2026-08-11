@@ -7,9 +7,13 @@ scikit-learn>=1.3.0
 pandas>=2.1.0
 numpy>=1.25.0
 
+# PCAP Ingestion
+scapy>=2.5.0
+
 # Dashboard (Stage 6)
 streamlit>=1.28.0
 plotly>=5.18.0
+requests>=2.31.0
 
 # Testing
 pytest>=7.4.0

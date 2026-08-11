@@ -20,8 +20,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from proto.someip import unpack_someip, HEADER_SIZE
-from proto.sd import SdEntryType, parse_sd_message
-from proto.constants import SD_PORT, SD_MULTICAST_GROUP, SERVICES
+from proto.sd import (
+    SdEntryType,
+    parse_sd_message,
+    hmac_verify_offer,
+    extract_service_id_from_offer,
+    HMAC_TAG_SIZE,
+)
+from proto.constants import SD_PORT, SD_MULTICAST_GROUP, SERVICES, SERVICE_HMAC_KEYS
 
 log = logging.getLogger("Discovery")
 
@@ -45,15 +51,21 @@ class ServiceDiscovery:
         self,
         listen_port: int = SD_PORT,
         on_service_found: Optional[Callable[[ServiceEndpoint], None]] = None,
+        hmac_verify: bool = True,
     ):
         self.listen_port = listen_port
         self.on_service_found = on_service_found
+        self.hmac_verify = hmac_verify
 
         # Registry:  service_id → ServiceEndpoint
         self.registry: Dict[int, ServiceEndpoint] = {}
         self._lock = threading.Lock()
         self._running = False
         self._sock: Optional[socket.socket] = None
+
+        # Counters for HMAC verification
+        self.hmac_accepted = 0
+        self.hmac_rejected = 0
 
     def get_endpoint(self, service_id: int) -> Optional[ServiceEndpoint]:
         """Look up a discovered service by ID."""
@@ -104,7 +116,29 @@ class ServiceDiscovery:
                     log.warning("SD receive error: %s", e)
 
     def _process_sd(self, data: bytes, addr: Tuple[str, int]) -> None:
-        """Parse SD message and update registry."""
+        """Parse SD message and update registry.
+        
+        If HMAC verification is enabled, offers from services with
+        pre-shared keys are only accepted if the HMAC tag is valid.
+        This blocks spoofed offers from attackers who don't know the key.
+        """
+        # HMAC verification step
+        if self.hmac_verify:
+            # Try to extract service_id to look up the key
+            service_id = extract_service_id_from_offer(data)
+            if service_id is not None and service_id in SERVICE_HMAC_KEYS:
+                key = SERVICE_HMAC_KEYS[service_id]
+                if not hmac_verify_offer(data, key):
+                    self.hmac_rejected += 1
+                    log.warning(
+                        "HMAC REJECTED: spoofed/unsigned offer for service 0x%04X from %s",
+                        service_id, addr[0],
+                    )
+                    return
+                self.hmac_accepted += 1
+                # Strip HMAC tag before parsing
+                data = data[:-HMAC_TAG_SIZE]
+
         entries = parse_sd_message(data)
         for entry in entries:
             if entry.entry_type == SdEntryType.OFFER_SERVICE and entry.ttl > 0:

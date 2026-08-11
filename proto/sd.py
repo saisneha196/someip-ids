@@ -50,6 +50,8 @@ IPv4 Endpoint Option (12 bytes):
 
 from __future__ import annotations
 
+import hmac
+import hashlib
 import struct
 import socket
 from dataclasses import dataclass
@@ -419,3 +421,73 @@ def parse_sd_message(data: bytes) -> List[SdEntry]:
         pos += 16
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# HMAC Authentication for SD Offers (Spoofing Prevention)
+# ---------------------------------------------------------------------------
+
+HMAC_TAG_SIZE = 32  # SHA-256 HMAC = 32 bytes
+
+
+def hmac_sign_offer(offer_msg: bytes, key: bytes) -> bytes:
+    """Append an HMAC-SHA256 tag to an SD Offer message.
+
+    The HMAC covers the entire SOME/IP frame (header + SD payload).
+    The signed message is: original_frame || hmac_tag (32 bytes).
+
+    This simulates what AUTOSAR SecOC does at the PDU level.
+    """
+    tag = hmac.new(key, offer_msg, hashlib.sha256).digest()
+    return offer_msg + tag
+
+
+def hmac_verify_offer(signed_msg: bytes, key: bytes) -> bool:
+    """Verify the HMAC-SHA256 tag on a signed SD Offer message.
+
+    Returns True if the tag is valid, False otherwise.
+    Expects the format: original_frame || hmac_tag (32 bytes).
+    """
+    if len(signed_msg) < HEADER_SIZE + HMAC_TAG_SIZE:
+        return False
+
+    frame = signed_msg[:-HMAC_TAG_SIZE]
+    received_tag = signed_msg[-HMAC_TAG_SIZE:]
+    expected_tag = hmac.new(key, frame, hashlib.sha256).digest()
+    return hmac.compare_digest(received_tag, expected_tag)
+
+
+def extract_service_id_from_offer(data: bytes) -> Optional[int]:
+    """Extract the service_id from an SD Offer's entry section.
+
+    Used by the HMAC verifier to look up the correct key before
+    parsing the full message.  Handles both signed and unsigned offers
+    by trying the full data first, then stripped.
+    """
+    def _try_extract(frame: bytes) -> Optional[int]:
+        try:
+            msg = unpack_someip(frame)
+        except ValueError:
+            return None
+        if msg.header.service_id != SD_SERVICE_ID:
+            return None
+        payload = msg.payload
+        if len(payload) < 24:  # flags(4) + entries_len(4) + 16-byte entry minimum
+            return None
+        entries_len = struct.unpack("!I", payload[4:8])[0]
+        if entries_len < 16:
+            return None
+        # Service ID is at offset 4 within the first entry (starts at payload[8])
+        service_id = struct.unpack("!H", payload[12:14])[0]
+        return service_id
+
+    # Try the full data first (unsigned offer)
+    result = _try_extract(data)
+    if result is not None:
+        return result
+
+    # Try stripping HMAC tag (signed offer)
+    if len(data) > HEADER_SIZE + HMAC_TAG_SIZE:
+        return _try_extract(data[:-HMAC_TAG_SIZE])
+
+    return None

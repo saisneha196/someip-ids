@@ -37,8 +37,9 @@ from proto.sd import (
     build_offer_service,
     build_subscribe_ack,
     parse_sd_message,
+    hmac_sign_offer,
 )
-from proto.constants import SD_SERVICE_ID, SD_METHOD_ID, SD_PORT
+from proto.constants import SD_SERVICE_ID, SD_METHOD_ID, SD_PORT, SERVICE_HMAC_KEYS
 from client.traffic_logger import get_logger
 
 logging.basicConfig(
@@ -95,6 +96,11 @@ class BaseService(ABC):
         self._sock: Optional[socket.socket] = None
         self._own_ip: str = ""
         self._running = False
+
+        # Session freshness tracking:  (client_id, src_ip) → last accepted session_id
+        # Rejects replayed/stale messages with session_id <= last accepted.
+        self._session_tracker: Dict[Tuple[int, str], int] = {}
+        self.session_freshness_enabled = True  # can be toggled off for testing
 
     # ------------------------------------------------------------------
     # Registration API for subclasses
@@ -175,6 +181,19 @@ class BaseService(ABC):
 
         # --- Method request? ---
         if h.message_type == MessageType.REQUEST:
+            # Session freshness check (replay prevention)
+            if self.session_freshness_enabled:
+                client_key = (h.client_id, addr[0])
+                last_session = self._session_tracker.get(client_key, 0)
+                if h.session_id <= last_session and h.session_id != 0:
+                    self.log.warning(
+                        "REPLAY REJECTED: session 0x%04X <= last 0x%04X from client 0x%04X @ %s",
+                        h.session_id, last_session, h.client_id, addr[0],
+                    )
+                    self._send_error(h, addr, ReturnCode.E_NOT_OK)
+                    return
+                self._session_tracker[client_key] = h.session_id
+
             handler = self._method_handlers.get(h.method_id)
             if handler is None:
                 self.log.warning(
@@ -265,7 +284,13 @@ class BaseService(ABC):
             return "127.0.0.1"
 
     async def _offer_loop(self) -> None:
-        """Periodically broadcast SD Offer Service."""
+        """Periodically broadcast SD Offer Service.
+        
+        If the service has a pre-shared HMAC key, the offer is signed
+        before broadcast. This prevents spoofing by attackers who don't
+        know the key.
+        """
+        hmac_key = SERVICE_HMAC_KEYS.get(self.service_id)
         while self._running:
             offer = build_offer_service(
                 self.service_id,
@@ -273,11 +298,15 @@ class BaseService(ABC):
                 self._own_ip,
                 self.port,
             )
+            # HMAC-sign the offer if we have a key
+            if hmac_key:
+                offer = hmac_sign_offer(offer, hmac_key)
             try:
                 self._sock.sendto(offer, (self.sd_broadcast_ip, self.sd_port))
                 self.log.info(
-                    "OFFER service 0x%04X at %s:%d",
+                    "OFFER service 0x%04X at %s:%d%s",
                     self.service_id, self._own_ip, self.port,
+                    " (HMAC signed)" if hmac_key else "",
                 )
             except Exception as e:
                 self.log.warning("Offer broadcast failed: %s", e)

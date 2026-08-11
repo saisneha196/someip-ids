@@ -90,3 +90,16 @@ for _svc in SERVICES.values():
 SERVICE_NAMES: dict[int, str] = {
     sid: meta["name"] for sid, meta in SERVICES.items()
 }
+
+# ---------------------------------------------------------------------------
+# HMAC Pre-shared keys for SD Offer authentication
+#
+# In a real vehicle, these would be provisioned during manufacturing
+# (e.g., stored in HSM / SecOC key slots).  Here they're simple
+# constants simulating that trust anchor.
+# ---------------------------------------------------------------------------
+SERVICE_HMAC_KEYS: dict[int, bytes] = {
+    HVAC_SERVICE_ID: b"hvac-secret-key-2026-autosar",
+    MEDIA_SERVICE_ID: b"media-secret-key-2026-autosar",
+    NAV_SERVICE_ID: b"navigation-secret-key-2026-autosar",
+}
