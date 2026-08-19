@@ -395,81 +395,135 @@ if not traffic_df.empty:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Main Content — Two columns
+# Panel 1: XGBoost Anomaly Score
 # ---------------------------------------------------------------------------
 
-left_col, right_col = st.columns([3, 2])
+st.subheader("📈 XGBoost Anomaly Score")
+
+if detector_status and detector_status.get("score_history"):
+    score_df = pd.DataFrame(detector_status["score_history"])
+    score_df["timestamp"] = pd.to_datetime(score_df["timestamp"])
+
+    fig_xgb = go.Figure()
+
+    # XGBoost score line
+    fig_xgb.add_trace(go.Scatter(
+        x=score_df["timestamp"],
+        y=score_df["score"],
+        mode="lines+markers",
+        name="XGBoost Score",
+        line=dict(color="#3498DB", width=2.5),
+        marker=dict(
+            size=5,
+            color=score_df["alert"].map({True: "#E74C3C", False: "#3498DB"}),
+        ),
+        fill="tozeroy",
+        fillcolor="rgba(52, 152, 219, 0.1)",
+    ))
+
+    # Threshold line
+    fig_xgb.add_hline(
+        y=ANOMALY_THRESHOLD,
+        line_dash="dash",
+        line_color="#E74C3C",
+        annotation_text=f"Alert Threshold ({ANOMALY_THRESHOLD})",
+        annotation_position="top right",
+    )
+
+    fig_xgb.update_layout(
+        height=280,
+        margin=dict(l=20, r=20, t=10, b=20),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.1)"),
+        yaxis=dict(
+            showgrid=True, gridcolor="rgba(128,128,128,0.1)",
+            range=[0, 1], title="Probability (0=normal, 1=attack)",
+        ),
+        font=dict(family="Inter"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_xgb, use_container_width=True)
+else:
+    st.info("Waiting for XGBoost scores...")
+
+st.divider()
 
 # ---------------------------------------------------------------------------
-# Left: Anomaly Score Time Series
+# Panel 2: Isolation Forest Anomaly Score
 # ---------------------------------------------------------------------------
 
-with left_col:
-    st.subheader("📈 Anomaly Score Over Time")
+st.subheader("🌲 Isolation Forest Anomaly Score")
 
-    if detector_status and detector_status.get("score_history"):
-        score_df = pd.DataFrame(detector_status["score_history"])
-        score_df["timestamp"] = pd.to_datetime(score_df["timestamp"])
+if detector_status and detector_status.get("score_history"):
+    score_df = pd.DataFrame(detector_status["score_history"])
+    score_df["timestamp"] = pd.to_datetime(score_df["timestamp"])
 
-        fig = go.Figure()
+    if "iforest_score" in score_df.columns:
+        fig_if = go.Figure()
 
-        # Score line
-        fig.add_trace(go.Scatter(
+        # IForest score line
+        fig_if.add_trace(go.Scatter(
             x=score_df["timestamp"],
-            y=score_df["score"],
+            y=score_df["iforest_score"],
             mode="lines+markers",
-            name="XGBoost Score",
-            line=dict(color="#3498DB", width=2),
+            name="IForest Score",
+            line=dict(color="#9B59B6", width=2.5),
             marker=dict(
-                size=6,
-                color=score_df["alert"].map({True: "#E74C3C", False: "#3498DB"}),
+                size=5,
+                color=score_df["iforest_score"].apply(
+                    lambda x: "#E74C3C" if x < -0.05 else "#9B59B6"
+                ),
             ),
             fill="tozeroy",
-            fillcolor="rgba(52, 152, 219, 0.1)",
+            fillcolor="rgba(155, 89, 182, 0.1)",
         ))
 
-        # IForest score line (if available)
-        if "iforest_score" in score_df.columns:
-            fig.add_trace(go.Scatter(
-                x=score_df["timestamp"],
-                y=score_df["iforest_score"].clip(lower=-0.2),
-                mode="lines",
-                name="IForest Score",
-                line=dict(color="#9B59B6", width=1.5, dash="dot"),
-                opacity=0.7,
-            ))
-
-        # Threshold line
-        fig.add_hline(
-            y=ANOMALY_THRESHOLD,
+        # Anomaly threshold line
+        fig_if.add_hline(
+            y=-0.05,
             line_dash="dash",
             line_color="#E74C3C",
-            annotation_text=f"Threshold ({ANOMALY_THRESHOLD})",
-            annotation_position="top right",
+            annotation_text="Anomaly Threshold (-0.05)",
+            annotation_position="bottom right",
         )
 
-        fig.update_layout(
-            height=350,
-            margin=dict(l=20, r=20, t=30, b=20),
+        # Zero line
+        fig_if.add_hline(
+            y=0,
+            line_dash="dot",
+            line_color="rgba(128,128,128,0.3)",
+        )
+
+        fig_if.update_layout(
+            height=280,
+            margin=dict(l=20, r=20, t=10, b=20),
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
             xaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.1)"),
-            yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.1)", range=[-0.2, 1]),
+            yaxis=dict(
+                showgrid=True, gridcolor="rgba(128,128,128,0.1)",
+                title="Score (negative = anomalous)",
+            ),
             font=dict(family="Inter"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_if, use_container_width=True)
     else:
-        st.info("Waiting for detector scores...")
+        st.info("IForest scores not available yet...")
+else:
+    st.info("Waiting for IForest scores...")
+
+st.divider()
 
 # ---------------------------------------------------------------------------
-# Right: Network Topology (replaces donut chart)
+# Panel 3: Network Topology (full width)
 # ---------------------------------------------------------------------------
 
-with right_col:
-    st.subheader("🔗 Network Topology")
-    topology_html = get_topology_html(DETECTOR_URL)
-    components.html(topology_html, height=420, scrolling=False)
+st.subheader("🔗 Network Topology")
+topology_html = get_topology_html(DETECTOR_URL)
+components.html(topology_html, height=420, scrolling=False)
+
 
 st.divider()
 
