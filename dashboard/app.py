@@ -25,7 +25,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
+
+from dashboard.topology import get_topology_html
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -460,36 +463,13 @@ with left_col:
         st.info("Waiting for detector scores...")
 
 # ---------------------------------------------------------------------------
-# Right: Traffic Distribution
+# Right: Network Topology (replaces donut chart)
 # ---------------------------------------------------------------------------
 
 with right_col:
-    st.subheader("🔄 Traffic Distribution")
-
-    if not traffic_df.empty and "service_id" in traffic_df.columns:
-        svc_counts = traffic_df["service_id"].value_counts()
-        svc_labels = [SERVICE_NAMES.get(sid, sid) for sid in svc_counts.index]
-        svc_colors = [SERVICE_COLORS.get(sid, "#95A5A6") for sid in svc_counts.index]
-
-        fig = go.Figure(data=[go.Pie(
-            labels=svc_labels,
-            values=svc_counts.values,
-            hole=0.5,
-            marker=dict(colors=svc_colors),
-            textinfo="label+percent",
-            textfont_size=12,
-        )])
-        fig.update_layout(
-            height=350,
-            margin=dict(l=20, r=20, t=30, b=20),
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Inter"),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No traffic data yet...")
+    st.subheader("🔗 Network Topology")
+    topology_html = get_topology_html(DETECTOR_URL)
+    components.html(topology_html, height=420, scrolling=False)
 
 st.divider()
 

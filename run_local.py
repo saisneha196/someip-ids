@@ -272,8 +272,8 @@ def detector_loop():
         print("🔬 Detector: training XGBoost + IForest models...")
         from detector.feature_extractor import extract_windows, load_traffic_log
 
-        # Wait for enough data
-        time.sleep(8)
+        # Wait for enough training data (more data = fewer false positives)
+        time.sleep(15)
 
         records = load_traffic_log(str(LOG_PATH))
         if len(records) < 10:
@@ -310,7 +310,7 @@ def detector_loop():
                 scaler = StandardScaler()
                 X_normal_scaled = scaler.fit_transform(X_normal)
                 iforest_model = IsolationForest(
-                    contamination=0.05, n_estimators=200, random_state=42
+                    contamination=0.01, n_estimators=200, random_state=42
                 )
                 iforest_model.fit(X_normal_scaled)
                 print(f"🔬 Detector: IForest trained on {len(X_normal)} normal windows")
@@ -336,6 +336,14 @@ def detector_loop():
         "latest_features": {},
         "score_history": [],
         "alert_count": 0,
+        # Per-service traffic stats (updated each window)
+        "services": {
+            "0x1001": {"name": "HVAC", "msg_count": 0, "attack_count": 0, "active": False, "under_attack": False},
+            "0x2001": {"name": "Media", "msg_count": 0, "attack_count": 0, "active": False, "under_attack": False},
+            "0x3001": {"name": "Navigation", "msg_count": 0, "attack_count": 0, "active": False, "under_attack": False},
+        },
+        "sd_active": False,
+        "total_window_msgs": 0,
     }
     state_lock = threading.Lock()
 
@@ -401,14 +409,15 @@ def detector_loop():
 
                     xgb_alert = xgb_prob >= threshold
 
-                    # IForest score
+                    # IForest score — use a score threshold instead of raw predict()
+                    # to reduce false positives on small training sets
                     if_score = 0.0
                     if_alert = False
+                    IF_SCORE_THRESHOLD = -0.05  # only alert on clearly anomalous scores
                     if iforest_model and scaler:
                         vec_scaled = scaler.transform(feature_vec)
-                        if_pred = iforest_model.predict(vec_scaled)
                         if_score = float(iforest_model.decision_function(vec_scaled)[0])
-                        if_alert = bool(if_pred[0] == -1)
+                        if_alert = if_score < IF_SCORE_THRESHOLD
 
                     is_alert = xgb_alert or if_alert
                     alert_source = ""
@@ -437,6 +446,27 @@ def detector_loop():
                             state["score_history"] = state["score_history"][-500:]
                         if is_alert:
                             state["alert_count"] += 1
+
+                        # Update per-service stats from this window
+                        svc_counts = {"0x1001": 0, "0x2001": 0, "0x3001": 0}
+                        svc_attacks = {"0x1001": 0, "0x2001": 0, "0x3001": 0}
+                        sd_active = False
+                        for msg in window_buf:
+                            sid = msg.get("service_id", "")
+                            lbl = msg.get("label", "normal")
+                            if sid in svc_counts:
+                                svc_counts[sid] += 1
+                                if lbl != "normal":
+                                    svc_attacks[sid] += 1
+                            if sid == "0xFFFF":
+                                sd_active = True
+                        for sid in ["0x1001", "0x2001", "0x3001"]:
+                            state["services"][sid]["msg_count"] = svc_counts[sid]
+                            state["services"][sid]["attack_count"] = svc_attacks[sid]
+                            state["services"][sid]["active"] = svc_counts[sid] > 0
+                            state["services"][sid]["under_attack"] = svc_attacks[sid] > 0
+                        state["sd_active"] = sd_active
+                        state["total_window_msgs"] = len(window_buf)
 
                     if is_alert:
                         print(f"  🚨 ALERT [{alert_source}] XGB={xgb_prob:.3f} IF={if_score:.3f} msgs={features.get('msg_count', 0)}")
