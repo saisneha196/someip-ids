@@ -137,8 +137,8 @@ def traffic_simulator():
             }
             _write_record(sd)
 
-        # ---- Attack bursts every 20-30 seconds ----
-        if cycle % 30 == 0 and cycle > 10:
+        # ---- Attack bursts every ~20-30 seconds ----
+        if cycle % 40 == 0 and cycle > 20:
             attack_type = random.choice(["flood", "replay", "spoofed_offer", "evasion_slow_flood"])
             print(f"  ⚡ Injecting {attack_type} attack at cycle {cycle}...")
 
@@ -256,75 +256,220 @@ def _inject_evasion(count):
 # Detector (simplified — runs XGBoost inline)
 # ======================================================================
 
+def _generate_synthetic_attack_features(n_normal_windows: int, feature_columns: list) -> list:
+    """Generate synthetic attack feature vectors to pre-seed the model.
+
+    Creates realistic attack-like feature profiles for:
+      - Flood attacks   (high msg_count, high burst rate, low entropy)
+      - Replay attacks  (low unique_sessions, low entropy, repeated IDs)
+      - Spoofed offers  (high sd_offer_count, high notification_ratio)
+      - Evasion/slow    (moderate rate from unusual IPs)
+
+    Returns a list of (feature_dict, label) tuples.
+    """
+    import numpy as np
+    synthetic = []
+
+    # --- Flood attack profiles (high volume bursts) ---
+    for _ in range(max(n_normal_windows, 8)):
+        synthetic.append(({
+            "msg_count": np.random.uniform(30, 120),
+            "msg_rate": np.random.uniform(6.0, 24.0),
+            "unique_services": np.random.choice([1, 2]),
+            "unique_methods": np.random.choice([1, 2]),
+            "unique_sessions": np.random.uniform(15, 80),
+            "session_id_entropy": np.random.uniform(3.5, 6.5),
+            "sd_offer_count": 0,
+            "sd_offer_rate": 0.0,
+            "mean_payload_size": np.random.uniform(4, 32),
+            "std_payload_size": np.random.uniform(0, 12),
+            "request_response_ratio": np.random.uniform(5.0, 50.0),
+            "notification_ratio": np.random.uniform(0, 0.05),
+            "unique_src_ips": np.random.choice([1, 2]),
+            "max_burst_rate": np.random.uniform(50.0, 500.0),
+        }, 1))
+
+    # --- Replay attack profiles (stale session IDs) ---
+    for _ in range(max(n_normal_windows // 2, 5)):
+        synthetic.append(({
+            "msg_count": np.random.uniform(5, 20),
+            "msg_rate": np.random.uniform(1.0, 4.0),
+            "unique_services": 1,
+            "unique_methods": 1,
+            "unique_sessions": np.random.choice([1, 2]),  # Very few unique sessions
+            "session_id_entropy": np.random.uniform(0.0, 0.5),  # Very low entropy
+            "sd_offer_count": 0,
+            "sd_offer_rate": 0.0,
+            "mean_payload_size": 6,
+            "std_payload_size": 0.0,
+            "request_response_ratio": np.random.uniform(3.0, 20.0),
+            "notification_ratio": 0.0,
+            "unique_src_ips": 1,
+            "max_burst_rate": np.random.uniform(5.0, 30.0),
+        }, 1))
+
+    # --- Spoofed SD offer profiles ---
+    for _ in range(max(n_normal_windows // 2, 5)):
+        synthetic.append(({
+            "msg_count": np.random.uniform(3, 15),
+            "msg_rate": np.random.uniform(0.6, 3.0),
+            "unique_services": np.random.choice([1, 2]),
+            "unique_methods": 1,
+            "unique_sessions": np.random.uniform(1, 10),
+            "session_id_entropy": np.random.uniform(0.5, 2.5),
+            "sd_offer_count": np.random.uniform(3, 15),  # Many SD offers
+            "sd_offer_rate": np.random.uniform(0.6, 3.0),
+            "mean_payload_size": np.random.uniform(30, 60),
+            "std_payload_size": np.random.uniform(0, 10),
+            "request_response_ratio": np.random.uniform(0.0, 1.0),
+            "notification_ratio": np.random.uniform(0.5, 1.0),  # High notification ratio
+            "unique_src_ips": 1,
+            "max_burst_rate": np.random.uniform(5.0, 30.0),
+        }, 1))
+
+    # --- Evasion / slow flood profiles ---
+    for _ in range(max(n_normal_windows // 2, 5)):
+        synthetic.append(({
+            "msg_count": np.random.uniform(8, 25),
+            "msg_rate": np.random.uniform(1.6, 5.0),
+            "unique_services": np.random.choice([2, 3]),
+            "unique_methods": np.random.choice([1, 2]),
+            "unique_sessions": np.random.uniform(6, 20),
+            "session_id_entropy": np.random.uniform(2.0, 4.0),
+            "sd_offer_count": 0,
+            "sd_offer_rate": 0.0,
+            "mean_payload_size": np.random.uniform(4, 12),
+            "std_payload_size": np.random.uniform(0, 5),
+            "request_response_ratio": np.random.uniform(4.0, 25.0),  # Requests without responses
+            "notification_ratio": 0.0,
+            "unique_src_ips": np.random.choice([2, 3]),  # New source IPs
+            "max_burst_rate": np.random.uniform(10.0, 40.0),
+        }, 1))
+
+    return synthetic
+
+
+def _train_models(log_path, feature_columns, window_seconds=5.0):
+    """Train XGBoost + IForest on accumulated log data with synthetic attack seeding.
+
+    Returns (model, iforest_model, scaler, training_info_str).
+    """
+    import numpy as np
+    import xgboost as xgb
+    from sklearn.ensemble import IsolationForest
+    from sklearn.preprocessing import StandardScaler
+    from detector.feature_extractor import extract_windows, load_traffic_log, FEATURE_COLUMNS
+
+    records = load_traffic_log(str(log_path))
+    if len(records) < 5:
+        return None, None, None, "not enough records"
+
+    df = extract_windows(records, window_seconds=window_seconds)
+    if df.empty or len(df) < 4:
+        return None, None, None, "not enough windows"
+
+    X_real = df[FEATURE_COLUMNS].values
+    y_real = df["label"].values
+    n_real_normal = int((y_real == 0).sum())
+    n_real_attack = int((y_real == 1).sum())
+
+    # --- Fix 4: Pre-seed synthetic attack features ---
+    # Always generate synthetic attacks so the model knows what to look for,
+    # even when no real attacks have been seen yet
+    synthetic_pairs = _generate_synthetic_attack_features(max(n_real_normal, 10), FEATURE_COLUMNS)
+    X_synth = np.array([[p[0][col] for col in FEATURE_COLUMNS] for p in synthetic_pairs])
+    y_synth = np.array([p[1] for p in synthetic_pairs])
+
+    # Combine real + synthetic data
+    X_combined = np.vstack([X_real, X_synth])
+    y_combined = np.concatenate([y_real, y_synth])
+
+    n_pos = max((y_combined == 1).sum(), 1)
+    n_neg = max((y_combined == 0).sum(), 1)
+
+    model = xgb.XGBClassifier(
+        n_estimators=100, max_depth=6, learning_rate=0.1,
+        scale_pos_weight=n_neg / n_pos,
+        objective="binary:logistic", eval_metric="logloss",
+        random_state=42, use_label_encoder=False,
+    )
+    model.fit(X_combined, y_combined, verbose=False)
+
+    # --- Fix 3: Better IForest configuration ---
+    # Train IForest on real normal-only data
+    X_normal = X_real[y_real == 0]
+    if len(X_normal) >= 10:  # Require ≥10 real normal windows (ideally ≥30)
+        scaler = StandardScaler()
+        X_normal_scaled = scaler.fit_transform(X_normal)
+        iforest_model = IsolationForest(
+            contamination=0.10,  # Raised from 0.01 — expect up to 10% anomalies
+            n_estimators=200,
+            random_state=42,
+        )
+        iforest_model.fit(X_normal_scaled)
+    else:
+        iforest_model = None
+        scaler = None
+
+    info = (f"{len(df)} windows ({n_real_normal} normal, {n_real_attack} attack) "
+            f"+ {len(synthetic_pairs)} synthetic attack samples"
+            + (f", IForest on {len(X_normal)} normal" if iforest_model else ", IForest skipped (need ≥10 normal)"))
+    return model, iforest_model, scaler, info
+
+
 def detector_loop():
-    """Runs the scoring loop with HTTP API."""
+    """Runs the scoring loop with HTTP API.
+
+    Fixes applied:
+      Fix 1: Delayed training — waits for attack data or 90s max
+      Fix 2: Periodic retraining — retrains every 60s on accumulated log
+      Fix 3: Better IForest — contamination=0.10, threshold=-0.02, ≥10 windows
+      Fix 4: Synthetic attack seeding — generates attack profiles for initial training
+      Bonus: Scoring window increased from 2s → 5s for stronger signal
+    """
     import numpy as np
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from detector.feature_extractor import compute_window_features, FEATURE_COLUMNS
 
-    # Train a quick model on synthetic data
+    model = None
+    iforest_model = None
+    scaler = None
+
     try:
         import xgboost as xgb
         from sklearn.ensemble import IsolationForest
         from sklearn.preprocessing import StandardScaler
-
-        # Generate training data
-        print("🔬 Detector: training XGBoost + IForest models...")
         from detector.feature_extractor import extract_windows, load_traffic_log
 
-        # Wait for enough training data (more data = fewer false positives)
-        time.sleep(15)
+        # --- Fix 1: Wait until attacks have been injected (or 90s max) ---
+        print("🔬 Detector: waiting for training data (need attack samples)...")
+        train_deadline = time.time() + 90  # Max wait: 90 seconds
+        min_wait = 30  # Minimum wait to accumulate enough data
+        time.sleep(min_wait)
 
-        records = load_traffic_log(str(LOG_PATH))
-        if len(records) < 10:
-            time.sleep(5)
+        while time.time() < train_deadline and RUNNING:
             records = load_traffic_log(str(LOG_PATH))
-
-        df = extract_windows(records, window_seconds=2.0)
-        if df.empty or len(df) < 4:
-            print("🔬 Detector: not enough data yet, using dummy model")
-            model = xgb.XGBClassifier(n_estimators=10, max_depth=3, use_label_encoder=False)
-            X_dummy = np.random.rand(20, len(FEATURE_COLUMNS))
-            y_dummy = np.array([0]*15 + [1]*5)
-            model.fit(X_dummy, y_dummy, verbose=False)
-            iforest_model = None
-            scaler = None
+            # Check if we have any attack-labeled records
+            attack_labels = [r for r in records if r.get("label", "normal") != "normal"]
+            n_records = len(records)
+            n_attacks = len(attack_labels)
+            if n_attacks > 0 and n_records >= 30:
+                print(f"🔬 Detector: found {n_attacks} attack records in {n_records} total — training now")
+                break
+            time.sleep(5)
         else:
-            X = df[FEATURE_COLUMNS].values
-            y = df["label"].values
+            records = load_traffic_log(str(LOG_PATH))
+            print(f"🔬 Detector: training deadline reached with {len(records)} records (will use synthetic attacks)")
 
-            model = xgb.XGBClassifier(
-                n_estimators=100, max_depth=6, learning_rate=0.1,
-                objective="binary:logistic", eval_metric="logloss",
-                random_state=42, use_label_encoder=False,
-            )
-
-            n_pos = max((y == 1).sum(), 1)
-            n_neg = max((y == 0).sum(), 1)
-            model.set_params(scale_pos_weight=n_neg / n_pos)
-            model.fit(X, y, verbose=False)
-
-            # Train IForest on normal-only
-            X_normal = X[y == 0]
-            if len(X_normal) > 3:
-                scaler = StandardScaler()
-                X_normal_scaled = scaler.fit_transform(X_normal)
-                iforest_model = IsolationForest(
-                    contamination=0.01, n_estimators=200, random_state=42
-                )
-                iforest_model.fit(X_normal_scaled)
-                print(f"🔬 Detector: IForest trained on {len(X_normal)} normal windows")
-            else:
-                iforest_model = None
-                scaler = None
-
-            print(f"🔬 Detector: XGBoost trained on {len(df)} windows ({(y==0).sum()} normal, {(y==1).sum()} attack)")
+        # Initial training
+        model, iforest_model, scaler, info = _train_models(LOG_PATH, FEATURE_COLUMNS, window_seconds=5.0)
+        if model:
+            print(f"🔬 Detector: INITIAL training complete — {info}")
+        else:
+            print(f"🔬 Detector: initial training skipped ({info}), will retry on next retrain cycle")
 
     except ImportError:
         print("🔬 Detector: xgboost not installed, using random scores")
-        model = None
-        iforest_model = None
-        scaler = None
 
     # Shared state
     state = {
@@ -344,6 +489,8 @@ def detector_loop():
         },
         "sd_active": False,
         "total_window_msgs": 0,
+        "model_version": 1,
+        "last_retrain": datetime.now(timezone.utc).isoformat(),
     }
     state_lock = threading.Lock()
 
@@ -372,9 +519,39 @@ def detector_loop():
     http_thread.start()
     print("🔬 Detector: HTTP API running on http://localhost:5001")
 
+    # --- Fix 2: Periodic retraining in background thread ---
+    RETRAIN_INTERVAL_SECONDS = 60  # Retrain every 60 seconds
+
+    def _retrain_loop():
+        nonlocal model, iforest_model, scaler
+        while RUNNING:
+            time.sleep(RETRAIN_INTERVAL_SECONDS)
+            if not RUNNING:
+                break
+            try:
+                new_model, new_if, new_scaler, info = _train_models(
+                    LOG_PATH, FEATURE_COLUMNS, window_seconds=5.0
+                )
+                if new_model:
+                    model = new_model
+                    iforest_model = new_if
+                    scaler = new_scaler
+                    with state_lock:
+                        state["model_version"] = state.get("model_version", 1) + 1
+                        state["last_retrain"] = datetime.now(timezone.utc).isoformat()
+                    print(f"  🔄 RETRAINED (v{state['model_version']}): {info}")
+            except Exception as e:
+                print(f"  ⚠ Retrain error: {e}")
+
+    retrain_thread = threading.Thread(target=_retrain_loop, daemon=True)
+    retrain_thread.start()
+
     # Scoring loop
-    window_seconds = 2.0
+    # Fix: increased window from 2s → 5s to capture more attack signal
+    window_seconds = 5.0
     threshold = 0.5
+    # --- Fix 3: Lower IForest threshold ---
+    IF_SCORE_THRESHOLD = -0.02  # Lowered from -0.05 to catch more anomalies
     window_buf = []
     window_start = time.time()
     last_pos = 0
@@ -409,11 +586,9 @@ def detector_loop():
 
                     xgb_alert = xgb_prob >= threshold
 
-                    # IForest score — use a score threshold instead of raw predict()
-                    # to reduce false positives on small training sets
+                    # IForest score
                     if_score = 0.0
                     if_alert = False
-                    IF_SCORE_THRESHOLD = -0.05  # only alert on clearly anomalous scores
                     if iforest_model and scaler:
                         vec_scaled = scaler.transform(feature_vec)
                         if_score = float(iforest_model.decision_function(vec_scaled)[0])

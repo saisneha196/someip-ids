@@ -41,6 +41,7 @@ LOG_PATH = os.environ.get("LOG_PATH", str(
 REFRESH_INTERVAL = 2  # seconds
 MAX_TRAFFIC_ROWS = 100
 ANOMALY_THRESHOLD = 0.5
+IF_SCORE_THRESHOLD = -0.02  # Must match run_local.py detector threshold
 
 # Service color mapping
 SERVICE_COLORS = {
@@ -239,26 +240,26 @@ with st.sidebar:
     col_a, col_b = st.columns(2)
 
     with col_a:
-        if st.button("🔴 Flood", use_container_width=True, help="50 rapid requests at 200 msg/s"):
+        if st.button("🔴 Flood", width="stretch", help="50 rapid requests at 200 msg/s"):
             n = inject_flood(50)
             st.toast(f"🔴 Flood attack launched! ({n} messages)", icon="💥")
 
-        if st.button("🟣 Spoofed Offer", use_container_width=True, help="5 fake SD service offers"):
+        if st.button("🟣 Spoofed Offer", width="stretch", help="5 fake SD service offers"):
             n = inject_spoofed_offer(5)
             st.toast(f"🟣 Spoofed offers sent! ({n} messages)", icon="📡")
 
     with col_b:
-        if st.button("🟠 Replay", use_container_width=True, help="8 replayed stale sessions"):
+        if st.button("🟠 Replay", width="stretch", help="8 replayed stale sessions"):
             n = inject_replay(8)
             st.toast(f"🟠 Replay attack launched! ({n} messages)", icon="🔁")
 
-        if st.button("💗 Evasion", use_container_width=True, help="12 slow stealthy requests"):
+        if st.button("💗 Evasion", width="stretch", help="12 slow stealthy requests"):
             n = inject_evasion(12)
             st.toast(f"💗 Evasion attack sent! ({n} messages)", icon="🥷")
 
     st.divider()
 
-    if st.button("💣 Launch ALL Attacks", use_container_width=True, type="primary"):
+    if st.button("💣 Launch ALL Attacks", width="stretch", type="primary"):
         inject_flood(50)
         inject_replay(8)
         inject_spoofed_offer(5)
@@ -443,7 +444,7 @@ if detector_status and detector_status.get("score_history"):
         font=dict(family="Inter"),
         showlegend=False,
     )
-    st.plotly_chart(fig_xgb, use_container_width=True)
+    st.plotly_chart(fig_xgb, width="stretch")
 else:
     st.info("Waiting for XGBoost scores...")
 
@@ -472,7 +473,7 @@ if detector_status and detector_status.get("score_history"):
             marker=dict(
                 size=5,
                 color=score_df["iforest_score"].apply(
-                    lambda x: "#E74C3C" if x < -0.05 else "#9B59B6"
+                    lambda x: "#E74C3C" if x < IF_SCORE_THRESHOLD else "#9B59B6"
                 ),
             ),
             fill="tozeroy",
@@ -481,10 +482,10 @@ if detector_status and detector_status.get("score_history"):
 
         # Anomaly threshold line
         fig_if.add_hline(
-            y=-0.05,
+            y=IF_SCORE_THRESHOLD,
             line_dash="dash",
             line_color="#E74C3C",
-            annotation_text="Anomaly Threshold (-0.05)",
+            annotation_text=f"Anomaly Threshold ({IF_SCORE_THRESHOLD})",
             annotation_position="bottom right",
         )
 
@@ -508,7 +509,7 @@ if detector_status and detector_status.get("score_history"):
             font=dict(family="Inter"),
             showlegend=False,
         )
-        st.plotly_chart(fig_if, use_container_width=True)
+        st.plotly_chart(fig_if, width="stretch")
     else:
         st.info("IForest scores not available yet...")
 else:
@@ -553,7 +554,7 @@ if not traffic_df.empty:
         return [f"color: {color}"] * len(row)
 
     styled = display_df.tail(50).style.apply(style_row, axis=1)
-    st.dataframe(styled, use_container_width=True, height=400)
+    st.dataframe(styled, width="stretch", height=400)
 else:
     st.info("📡 Waiting for traffic data... Run: `python run_local.py`")
 
