@@ -130,6 +130,29 @@ st.markdown("""
     .attack-btn {
         font-size: 1.1em;
     }
+
+    .attack-type-badge {
+        display: inline-block;
+        padding: 4px 14px;
+        border-radius: 20px;
+        font-size: 0.85em;
+        font-weight: 600;
+        margin: 2px 4px;
+    }
+    .badge-flood { background: #E74C3C; color: white; }
+    .badge-replay { background: #E67E22; color: white; }
+    .badge-spoof { background: #9B59B6; color: white; }
+    .badge-evasion { background: #FF6B9D; color: white; }
+    .badge-none { background: #2ECC71; color: white; }
+
+    .attack-type-card {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border: 1px solid #2a2a4a;
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+        margin: 4px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -350,10 +373,12 @@ if detector_status and detector_status.get("is_alert"):
     if_score = detector_status.get("latest_iforest_score", 0)
     source = detector_status.get("alert_source", "")
     source_label = {"xgboost": "XGBoost", "iforest": "Isolation Forest", "both": "XGBoost + IForest"}.get(source, source)
+    attack_display = detector_status.get("attack_type_display", "")
+    attack_line = f'<br><span style="font-size:1.1em">{attack_display}</span>' if attack_display else ''
     st.markdown(
         f'<div class="alert-banner">🚨 ANOMALY DETECTED [{source_label}] — '
-        f'XGB: {score:.3f} | IForest: {if_score:.3f} — '
-        f'{detector_status.get("latest_timestamp", "")}</div>',
+        f'XGB: {score:.3f} | IForest: {if_score:.3f}'
+        f'{attack_line}</div>',
         unsafe_allow_html=True,
     )
 elif detector_status:
@@ -392,6 +417,30 @@ if not traffic_df.empty:
             st.metric("📊 Anomaly Score", f"{detector_status.get('latest_score', 0):.3f}")
         else:
             st.metric("📊 Anomaly Score", "N/A")
+
+# ---------------------------------------------------------------------------
+# Attack Detection Breakdown
+# ---------------------------------------------------------------------------
+
+if detector_status and detector_status.get("alert_count", 0) > 0:
+    st.divider()
+    st.subheader("🎯 Attack Detection Breakdown")
+
+    atk_counts = detector_status.get("attack_type_counts", {})
+    atk_col1, atk_col2, atk_col3, atk_col4 = st.columns(4)
+
+    with atk_col1:
+        flood_n = atk_counts.get("flood", 0)
+        st.markdown(f'<div class="attack-type-card"><span class="attack-type-badge badge-flood">🔴 FLOOD</span><br><span style="font-size:2em;font-weight:700">{flood_n}</span><br>alerts</div>', unsafe_allow_html=True)
+    with atk_col2:
+        replay_n = atk_counts.get("replay", 0)
+        st.markdown(f'<div class="attack-type-card"><span class="attack-type-badge badge-replay">🟠 REPLAY</span><br><span style="font-size:2em;font-weight:700">{replay_n}</span><br>alerts</div>', unsafe_allow_html=True)
+    with atk_col3:
+        spoof_n = atk_counts.get("spoofed_offer", 0)
+        st.markdown(f'<div class="attack-type-card"><span class="attack-type-badge badge-spoof">🟣 SPOOFED</span><br><span style="font-size:2em;font-weight:700">{spoof_n}</span><br>alerts</div>', unsafe_allow_html=True)
+    with atk_col4:
+        evasion_n = atk_counts.get("evasion_slow_flood", 0)
+        st.markdown(f'<div class="attack-type-card"><span class="attack-type-badge badge-evasion">💗 EVASION</span><br><span style="font-size:2em;font-weight:700">{evasion_n}</span><br>alerts</div>', unsafe_allow_html=True)
 
 st.divider()
 

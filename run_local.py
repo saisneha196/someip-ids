@@ -471,6 +471,16 @@ def detector_loop():
     except ImportError:
         print("🔬 Detector: xgboost not installed, using random scores")
 
+    # Attack type display names
+    ATTACK_TYPE_LABELS = {
+        "flood": "🔴 Flood Attack",
+        "replay": "🟠 Replay Attack",
+        "spoofed_offer": "🟣 Spoofed Offer",
+        "evasion_slow_flood": "💗 Evasion (Slow Flood)",
+        "evasion_spaced_replay": "💗 Evasion (Spaced Replay)",
+        "malformed_sd": "🟡 Malformed SD",
+    }
+
     # Shared state
     state = {
         "latest_score": 0.0,
@@ -478,9 +488,12 @@ def detector_loop():
         "latest_timestamp": "",
         "is_alert": False,
         "alert_source": "",
+        "attack_type": "",
+        "attack_types_in_window": {},
         "latest_features": {},
         "score_history": [],
         "alert_count": 0,
+        "attack_type_counts": {"flood": 0, "replay": 0, "spoofed_offer": 0, "evasion_slow_flood": 0},
         # Per-service traffic stats (updated each window)
         "services": {
             "0x1001": {"name": "HVAC", "msg_count": 0, "attack_count": 0, "active": False, "under_attack": False},
@@ -605,22 +618,45 @@ def detector_loop():
 
                     ts = datetime.now(timezone.utc).isoformat()
 
+                    # --- Classify attack type from window messages ---
+                    attack_labels_in_window = {}
+                    for msg in window_buf:
+                        lbl = msg.get("label", "normal")
+                        if lbl != "normal":
+                            attack_labels_in_window[lbl] = attack_labels_in_window.get(lbl, 0) + 1
+
+                    # Determine dominant attack type
+                    if attack_labels_in_window:
+                        dominant_attack = max(attack_labels_in_window, key=attack_labels_in_window.get)
+                    else:
+                        dominant_attack = ""
+
+                    # Get display name
+                    attack_type_display = ATTACK_TYPE_LABELS.get(dominant_attack, dominant_attack) if dominant_attack else ""
+
                     with state_lock:
                         state["latest_score"] = xgb_prob
                         state["latest_iforest_score"] = if_score
                         state["latest_timestamp"] = ts
                         state["is_alert"] = is_alert
                         state["alert_source"] = alert_source
+                        state["attack_type"] = dominant_attack
+                        state["attack_type_display"] = attack_type_display
+                        state["attack_types_in_window"] = attack_labels_in_window
                         state["latest_features"] = {k: round(v, 4) if isinstance(v, float) else v for k, v in features.items()}
                         state["score_history"].append({
                             "timestamp": ts, "score": xgb_prob,
                             "iforest_score": if_score,
                             "alert": is_alert, "alert_source": alert_source,
+                            "attack_type": dominant_attack,
                         })
                         if len(state["score_history"]) > 500:
                             state["score_history"] = state["score_history"][-500:]
                         if is_alert:
                             state["alert_count"] += 1
+                            # Track cumulative attack type counts
+                            if dominant_attack in state["attack_type_counts"]:
+                                state["attack_type_counts"][dominant_attack] += 1
 
                         # Update per-service stats from this window
                         svc_counts = {"0x1001": 0, "0x2001": 0, "0x3001": 0}
@@ -644,7 +680,8 @@ def detector_loop():
                         state["total_window_msgs"] = len(window_buf)
 
                     if is_alert:
-                        print(f"  🚨 ALERT [{alert_source}] XGB={xgb_prob:.3f} IF={if_score:.3f} msgs={features.get('msg_count', 0)}")
+                        atk_str = f" | {attack_type_display}" if attack_type_display else ""
+                        print(f"  🚨 ALERT [{alert_source}] XGB={xgb_prob:.3f} IF={if_score:.3f} msgs={features.get('msg_count', 0)}{atk_str}")
 
                 window_buf = []
                 window_start = time.time()
