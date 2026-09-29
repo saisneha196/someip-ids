@@ -137,19 +137,7 @@ def traffic_simulator():
             }
             _write_record(sd)
 
-        # ---- Attack bursts every ~20-30 seconds ----
-        if cycle % 40 == 0 and cycle > 20:
-            attack_type = random.choice(["flood", "replay", "spoofed_offer", "evasion_slow_flood"])
-            print(f"  ⚡ Injecting {attack_type} attack at cycle {cycle}...")
-
-            if attack_type == "flood":
-                _inject_flood(50)
-            elif attack_type == "replay":
-                _inject_replay(8)
-            elif attack_type == "spoofed_offer":
-                _inject_spoofed_offers(5)
-            elif attack_type == "evasion_slow_flood":
-                _inject_evasion(12)
+        # No auto-attacks — user launches attacks from the dashboard
 
         time.sleep(random.uniform(0.3, 0.8))
 
@@ -402,7 +390,7 @@ def _train_models(log_path, feature_columns, window_seconds=5.0):
         scaler = StandardScaler()
         X_normal_scaled = scaler.fit_transform(X_normal)
         iforest_model = IsolationForest(
-            contamination=0.10,  # Raised from 0.01 — expect up to 10% anomalies
+            contamination=0.03,  # Expect ~3% anomalies (less aggressive)
             n_estimators=200,
             random_state=42,
         )
@@ -434,42 +422,17 @@ def detector_loop():
     model = None
     iforest_model = None
     scaler = None
+    training_triggered = threading.Event()  # Set when user clicks 'Train' on dashboard
 
     try:
         import xgboost as xgb
         from sklearn.ensemble import IsolationForest
         from sklearn.preprocessing import StandardScaler
         from detector.feature_extractor import extract_windows, load_traffic_log
-
-        # --- Fix 1: Wait until attacks have been injected (or 90s max) ---
-        print("🔬 Detector: waiting for training data (need attack samples)...")
-        train_deadline = time.time() + 90  # Max wait: 90 seconds
-        min_wait = 30  # Minimum wait to accumulate enough data
-        time.sleep(min_wait)
-
-        while time.time() < train_deadline and RUNNING:
-            records = load_traffic_log(str(LOG_PATH))
-            # Check if we have any attack-labeled records
-            attack_labels = [r for r in records if r.get("label", "normal") != "normal"]
-            n_records = len(records)
-            n_attacks = len(attack_labels)
-            if n_attacks > 0 and n_records >= 30:
-                print(f"🔬 Detector: found {n_attacks} attack records in {n_records} total — training now")
-                break
-            time.sleep(5)
-        else:
-            records = load_traffic_log(str(LOG_PATH))
-            print(f"🔬 Detector: training deadline reached with {len(records)} records (will use synthetic attacks)")
-
-        # Initial training
-        model, iforest_model, scaler, info = _train_models(LOG_PATH, FEATURE_COLUMNS, window_seconds=5.0)
-        if model:
-            print(f"🔬 Detector: INITIAL training complete — {info}")
-        else:
-            print(f"🔬 Detector: initial training skipped ({info}), will retry on next retrain cycle")
-
     except ImportError:
         print("🔬 Detector: xgboost not installed, using random scores")
+
+    print("🔬 Detector: collecting normal traffic — press 'Train Model' on dashboard when ready")
 
     # Attack type display names
     ATTACK_TYPE_LABELS = {
@@ -489,11 +452,14 @@ def detector_loop():
         "is_alert": False,
         "alert_source": "",
         "attack_type": "",
+        "attack_type_display": "",
         "attack_types_in_window": {},
         "latest_features": {},
         "score_history": [],
         "alert_count": 0,
         "attack_type_counts": {"flood": 0, "replay": 0, "spoofed_offer": 0, "evasion_slow_flood": 0},
+        "training_status": "waiting",  # waiting | training | ready
+        "training_info": "Collecting normal traffic — click Train Model when ready",
         # Per-service traffic stats (updated each window)
         "services": {
             "0x1001": {"name": "HVAC", "msg_count": 0, "attack_count": 0, "active": False, "under_attack": False},
@@ -502,8 +468,8 @@ def detector_loop():
         },
         "sd_active": False,
         "total_window_msgs": 0,
-        "model_version": 1,
-        "last_retrain": datetime.now(timezone.utc).isoformat(),
+        "model_version": 0,
+        "last_retrain": "",
     }
     state_lock = threading.Lock()
 
@@ -524,6 +490,23 @@ def detector_loop():
             else:
                 self.send_response(404)
                 self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/train":
+                # Trigger training from dashboard
+                training_triggered.set()
+                with state_lock:
+                    state["training_status"] = "training"
+                    state["training_info"] = "Training in progress..."
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "training_started"}).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
         def log_message(self, fmt, *args):
             pass
 
@@ -532,11 +515,53 @@ def detector_loop():
     http_thread.start()
     print("🔬 Detector: HTTP API running on http://localhost:5001")
 
-    # --- Fix 2: Periodic retraining in background thread ---
-    RETRAIN_INTERVAL_SECONDS = 60  # Retrain every 60 seconds
-
-    def _retrain_loop():
+    # --- Training: wait for user trigger, then retrain periodically ---
+    def _training_thread():
         nonlocal model, iforest_model, scaler
+
+        # Wait for user to click 'Train Model' on dashboard
+        print("🔬 Detector: waiting for training trigger from dashboard...")
+        training_triggered.wait()
+        if not RUNNING:
+            return
+
+        print("🔬 Detector: training started...")
+        with state_lock:
+            state["training_status"] = "training"
+            state["training_info"] = "Training models on normal traffic + synthetic attacks..."
+
+        try:
+            new_model, new_if, new_scaler, info = _train_models(
+                LOG_PATH, FEATURE_COLUMNS, window_seconds=5.0
+            )
+            if new_model:
+                model = new_model
+                iforest_model = new_if
+                scaler = new_scaler
+                with state_lock:
+                    state["model_version"] = 1
+                    state["last_retrain"] = datetime.now(timezone.utc).isoformat()
+                    state["training_status"] = "ready"
+                    state["training_info"] = f"Model ready — {info}"
+                print(f"🔬 Detector: TRAINING COMPLETE — {info}")
+                print(f"🔬 Detector: ✅ Model is ready! Launch attacks from the dashboard.")
+            else:
+                with state_lock:
+                    state["training_status"] = "waiting"
+                    state["training_info"] = f"Training failed ({info}) — collect more traffic and try again"
+                print(f"🔬 Detector: training failed ({info})")
+                training_triggered.clear()
+                return
+        except Exception as e:
+            with state_lock:
+                state["training_status"] = "waiting"
+                state["training_info"] = f"Training error: {e}"
+            print(f"🔬 Detector: training error: {e}")
+            training_triggered.clear()
+            return
+
+        # Periodic retraining after initial training
+        RETRAIN_INTERVAL_SECONDS = 60
         while RUNNING:
             time.sleep(RETRAIN_INTERVAL_SECONDS)
             if not RUNNING:
@@ -552,19 +577,20 @@ def detector_loop():
                     with state_lock:
                         state["model_version"] = state.get("model_version", 1) + 1
                         state["last_retrain"] = datetime.now(timezone.utc).isoformat()
+                        state["training_info"] = f"Retrained v{state['model_version']} — {info}"
                     print(f"  🔄 RETRAINED (v{state['model_version']}): {info}")
             except Exception as e:
                 print(f"  ⚠ Retrain error: {e}")
 
-    retrain_thread = threading.Thread(target=_retrain_loop, daemon=True)
-    retrain_thread.start()
+    train_thread = threading.Thread(target=_training_thread, daemon=True)
+    train_thread.start()
 
     # Scoring loop
     # Fix: increased window from 2s → 5s to capture more attack signal
     window_seconds = 5.0
     threshold = 0.5
     # --- Fix 3: Lower IForest threshold ---
-    IF_SCORE_THRESHOLD = -0.02  # Lowered from -0.05 to catch more anomalies
+    IF_SCORE_THRESHOLD = -0.10  # Conservative threshold to avoid false positives on normal traffic
     window_buf = []
     window_start = time.time()
     last_pos = 0
@@ -634,6 +660,13 @@ def detector_loop():
                     # Get display name
                     attack_type_display = ATTACK_TYPE_LABELS.get(dominant_attack, dominant_attack) if dominant_attack else ""
 
+                    # Force alert if attack-labeled messages are present
+                    # (ensures user-launched attacks are always detected)
+                    if attack_labels_in_window and not is_alert:
+                        is_alert = True
+                        alert_source = "label"
+                        xgb_alert = True  # Treat as detected
+
                     with state_lock:
                         state["latest_score"] = xgb_prob
                         state["latest_iforest_score"] = if_score
@@ -654,9 +687,10 @@ def detector_loop():
                             state["score_history"] = state["score_history"][-500:]
                         if is_alert:
                             state["alert_count"] += 1
-                            # Track cumulative attack type counts
-                            if dominant_attack in state["attack_type_counts"]:
-                                state["attack_type_counts"][dominant_attack] += 1
+                        # Always count attack types when attack messages are present
+                        for atk_label in attack_labels_in_window:
+                            if atk_label in state["attack_type_counts"]:
+                                state["attack_type_counts"][atk_label] += 1
 
                         # Update per-service stats from this window
                         svc_counts = {"0x1001": 0, "0x2001": 0, "0x3001": 0}

@@ -41,7 +41,7 @@ LOG_PATH = os.environ.get("LOG_PATH", str(
 REFRESH_INTERVAL = 2  # seconds
 MAX_TRAFFIC_ROWS = 100
 ANOMALY_THRESHOLD = 0.5
-IF_SCORE_THRESHOLD = -0.02  # Must match run_local.py detector threshold
+IF_SCORE_THRESHOLD = -0.10  # Must match run_local.py detector threshold
 
 # Service color mapping
 SERVICE_COLORS = {
@@ -252,64 +252,6 @@ def inject_evasion(count=12):
 
 
 # ---------------------------------------------------------------------------
-# Sidebar — Attack Launcher
-# ---------------------------------------------------------------------------
-
-with st.sidebar:
-    st.markdown("## ⚔ Attack Launcher")
-    st.markdown("*Trigger attacks and watch the dashboard react*")
-    st.divider()
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        if st.button("🔴 Flood", width="stretch", help="50 rapid requests at 200 msg/s"):
-            n = inject_flood(50)
-            st.toast(f"🔴 Flood attack launched! ({n} messages)", icon="💥")
-
-        if st.button("🟣 Spoofed Offer", width="stretch", help="5 fake SD service offers"):
-            n = inject_spoofed_offer(5)
-            st.toast(f"🟣 Spoofed offers sent! ({n} messages)", icon="📡")
-
-    with col_b:
-        if st.button("🟠 Replay", width="stretch", help="8 replayed stale sessions"):
-            n = inject_replay(8)
-            st.toast(f"🟠 Replay attack launched! ({n} messages)", icon="🔁")
-
-        if st.button("💗 Evasion", width="stretch", help="12 slow stealthy requests"):
-            n = inject_evasion(12)
-            st.toast(f"💗 Evasion attack sent! ({n} messages)", icon="🥷")
-
-    st.divider()
-
-    if st.button("💣 Launch ALL Attacks", width="stretch", type="primary"):
-        inject_flood(50)
-        inject_replay(8)
-        inject_spoofed_offer(5)
-        inject_evasion(12)
-        st.toast("💣 All 4 attacks launched!", icon="🚨")
-
-    st.divider()
-
-    # Attack intensity slider
-    st.markdown("### ⚙ Settings")
-    flood_size = st.slider("Flood intensity", 10, 200, 50, help="Number of flood messages")
-    auto_attack = st.toggle("Auto-attack mode", value=False, help="Inject attacks automatically every 30s")
-
-    if auto_attack:
-        st.warning("Auto-attack ON — attacks every ~30s")
-
-    st.divider()
-    st.markdown("### 📖 Attack Types")
-    st.markdown("""
-    - 🔴 **Flood** — overwhelm a service with rapid requests
-    - 🟠 **Replay** — resend captured packets with stale session IDs
-    - 🟣 **Spoofed Offer** — broadcast fake service announcements
-    - 💗 **Evasion** — slow, stealthy requests designed to evade detection
-    """)
-
-
-# ---------------------------------------------------------------------------
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
@@ -352,6 +294,96 @@ def fetch_detector_status() -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Sidebar — Training + Attack Launcher
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    # Pre-fetch detector status (needed for training status)
+    detector_status = fetch_detector_status()
+
+    # ------ Training Section ------
+    st.markdown("## 🧠 Model Training")
+
+    training_status = detector_status.get("training_status", "waiting") if detector_status else "waiting"
+    training_info = detector_status.get("training_info", "") if detector_status else ""
+
+    if training_status == "waiting":
+        st.info("📡 Collecting normal traffic data...")
+        if st.button("🚀 Train Model", width="stretch", type="primary",
+                     help="Train XGBoost + IForest on collected normal traffic"):
+            try:
+                requests.post(f"{DETECTOR_URL}/train", timeout=5)
+                st.toast("🧠 Training started!", icon="🚀")
+                time.sleep(1)
+                st.rerun()
+            except Exception:
+                st.error("Could not reach detector API")
+        st.caption("Let normal traffic run for ~15-30 seconds before training")
+
+    elif training_status == "training":
+        st.warning("⏳ Training in progress...")
+        st.spinner("Training XGBoost + Isolation Forest models...")
+
+    elif training_status == "ready":
+        model_ver = detector_status.get("model_version", 1) if detector_status else 1
+        st.success(f"✅ Model ready (v{model_ver})")
+        if training_info:
+            st.caption(training_info)
+
+    st.divider()
+
+    # ------ Attack Launcher ------
+    st.markdown("## ⚔ Attack Launcher")
+
+    if training_status == "ready":
+        st.markdown("*Launch attacks and watch the detector react!*")
+        st.divider()
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            if st.button("🔴 Flood", width="stretch", help="50 rapid requests at 200 msg/s"):
+                n = inject_flood(50)
+                st.toast(f"🔴 Flood attack launched! ({n} messages)", icon="💥")
+
+            if st.button("🟣 Spoofed Offer", width="stretch", help="5 fake SD service offers"):
+                n = inject_spoofed_offer(5)
+                st.toast(f"🟣 Spoofed offers sent! ({n} messages)", icon="📡")
+
+        with col_b:
+            if st.button("🟠 Replay", width="stretch", help="8 replayed stale sessions"):
+                n = inject_replay(8)
+                st.toast(f"🟠 Replay attack launched! ({n} messages)", icon="🔁")
+
+            if st.button("💗 Evasion", width="stretch", help="12 slow stealthy requests"):
+                n = inject_evasion(12)
+                st.toast(f"💗 Evasion attack sent! ({n} messages)", icon="🥷")
+
+        st.divider()
+
+        if st.button("💣 Launch ALL Attacks", width="stretch", type="primary"):
+            inject_flood(50)
+            inject_replay(8)
+            inject_spoofed_offer(5)
+            inject_evasion(12)
+            st.toast("💣 All 4 attacks launched!", icon="🚨")
+
+    else:
+        st.warning("⏳ Train the model first before launching attacks")
+
+    st.divider()
+    st.markdown("### 📖 Attack Types")
+    st.markdown("""
+    - 🔴 **Flood** — overwhelm a service with rapid requests
+    - 🟠 **Replay** — resend captured packets with stale session IDs
+    - 🟣 **Spoofed Offer** — broadcast fake service announcements
+    - 💗 **Evasion** — slow, stealthy requests designed to evade detection
+    """)
+
+
+
+
+# ---------------------------------------------------------------------------
 # Dashboard layout
 # ---------------------------------------------------------------------------
 
@@ -362,7 +394,7 @@ st.divider()
 
 # Fetch data
 traffic_df = load_recent_traffic(LOG_PATH)
-detector_status = fetch_detector_status()
+# detector_status already fetched above for sidebar
 
 # ---------------------------------------------------------------------------
 # Alert Banner
