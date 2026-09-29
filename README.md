@@ -1,10 +1,10 @@
 # SOME/IP Automotive Intrusion Detection System
 
-[![CI](https://github.com/your-repo/someip-ids/actions/workflows/ci.yml/badge.svg)](https://github.com/your-repo/someip-ids/actions)
+[![CI](https://github.com/saisneha196/someip-ids/actions/workflows/ci.yml/badge.svg)](https://github.com/saisneha196/someip-ids/actions)
 
-> **"Fake ECUs talk to each other normally, I attack them on purpose, everything gets logged, and a model learns to spot the attacks live on a dashboard — all running in Docker with automated tests behind it."**
+> **"Fake ECUs talk to each other normally, I attack them on purpose, everything gets logged, and a model learns to spot the attacks live on a dashboard — all running locally or in Docker with automated tests behind it."**
 
-A full-stack intrusion detection pipeline for automotive SOME/IP networks: simulated ECU services on a Docker network, attack injection, XGBoost-based anomaly detection, and a live Streamlit dashboard — all containerized with CI/CD.
+A full-stack intrusion detection pipeline for automotive SOME/IP networks: simulated ECU traffic generation, 4 attack types, dual-model anomaly detection (XGBoost + Isolation Forest) with live retraining, and a real-time Streamlit dashboard with interactive attack controls.
 
 ---
 
@@ -12,103 +12,160 @@ A full-stack intrusion detection pipeline for automotive SOME/IP networks: simul
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Docker Bridge Network                        │
-│                     (172.20.0.0/24)                              │
+│                     SOME/IP IDS Pipeline                         │
 │                                                                  │
 │   ┌──────────┐  ┌──────────┐  ┌──────────────┐                 │
 │   │   HVAC   │  │  Media   │  │  Navigation  │  ECU Services   │
-│   │ :30501   │  │ :30502   │  │   :30503     │  (SD Offer)     │
+│   │  0x1001  │  │  0x2001  │  │    0x3001    │  (Simulated)    │
 │   └────┬─────┘  └────┬─────┘  └──────┬───────┘                 │
 │        │              │               │                          │
-│        │    SD Offers (broadcast)      │                          │
+│        │    Normal + Attack Traffic   │                          │
 │        ▼              ▼               ▼                          │
 │   ┌────────────────────────────────────────┐                    │
-│   │         Head-Unit Client               │  Discovers via SD  │
-│   │   Calls methods, subscribes events     │  Logs everything   │
+│   │        Traffic Simulator              │  Logs to JSONL      │
+│   │   Normal traffic + 4 attack types     │  every 0.3-0.8s    │
 │   └────────────────┬───────────────────────┘                    │
 │                    │                                             │
 │                    ▼  traffic.jsonl                              │
 │   ┌────────────────────────────────────────┐                    │
-│   │       Feature Extractor + XGBoost      │  2s windows        │
-│   │           Anomaly Detector             │  Scores & alerts   │
+│   │    Dual-Model Anomaly Detector        │  5s windows         │
+│   │  XGBoost (supervised) + IForest       │  Retrains every 60s │
+│   │  + Synthetic attack pre-seeding       │  HTTP API :5001     │
 │   └────────────────┬───────────────────────┘                    │
 │                    │                                             │
 │                    ▼                                             │
 │   ┌────────────────────────────────────────┐                    │
-│   │       Streamlit Dashboard :8501        │  Live graphs       │
-│   │   Traffic feed • Score graph • Alerts  │  Red banners       │
-│   └────────────────────────────────────────┘                    │
-│                                                                  │
-│   ┌────────────────────────────────────────┐                    │
-│   │          Attack Scripts                │  Runs separately   │
-│   │   Replay • Flood • Spoof • Malformed  │                    │
+│   │       Streamlit Dashboard :8501       │  Live graphs        │
+│   │  XGBoost + IForest scores • Topology  │  Alert banners      │
+│   │  Traffic feed • Attack launcher       │  Auto-refresh 2s    │
 │   └────────────────────────────────────────┘                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+---
+
 ## Quick Start
 
 ### Prerequisites
-- Docker Desktop (with Docker Compose v2)
-- Python 3.11+ (for running attacks and training locally)
 
-### 1. Start the Vehicle Network
+- **Python 3.11+**
+- Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Run the Full Pipeline (Recommended)
+
+```bash
+python run_local.py
+```
+
+This single command starts **everything** in parallel:
+
+| Component | What it does | URL |
+|:---|:---|:---|
+| Traffic Simulator | Generates normal + attack traffic to `local_logs/traffic.jsonl` | — |
+| Detector | XGBoost + IForest scoring with HTTP API | http://localhost:5001/status |
+| Dashboard | Live Streamlit visualization with attack controls | http://localhost:8501 |
+
+Press **Ctrl+C** to stop all components.
+
+### Run the Offline Demo
+
+```bash
+python demo.py
+```
+
+Runs all 8 stages sequentially in the terminal (no dashboard):
+1. Protocol codec verification
+2. Traffic generation (normal + attacks)
+3. Feature extraction (14 features)
+4. XGBoost training + evaluation
+5. HMAC verification
+6. Session freshness check
+7. Adversarial evasion testing
+8. Isolation Forest evaluation
+
+### Run with Docker
 
 ```bash
 docker compose up --build
 ```
 
-This starts HVAC, Media, and Navigation ECU services, plus the head-unit client. You'll see:
-- Services broadcasting SD Offer messages every 3 seconds
-- Client discovering services and calling methods
-- Traffic being logged to the shared `traffic.jsonl`
+Open http://localhost:8501 for the dashboard.
 
-### 2. Watch the Traffic
+---
 
-```bash
-# Follow client interactions
-docker compose logs -f client
+## Detection System
 
-# Tail the raw traffic log
-docker compose exec client tail -f /logs/traffic.jsonl | python -m json.tool
-```
+### Dual-Model Architecture
 
-### 3. Launch Attacks
+The detector uses two complementary models that run in parallel on every scoring window:
 
-In a separate terminal:
+| Model | Type | What it catches | Alert condition |
+|:---|:---|:---|:---|
+| **XGBoost** | Supervised | Known attack patterns (flood, replay, spoof, evasion) | Score ≥ 0.5 |
+| **Isolation Forest** | Unsupervised | Any deviation from learned "normal" | Score < -0.02 |
 
-```bash
-# Flood the HVAC service
-docker compose exec client python -m attacks.flood --target-service HVAC --duration 10
+An alert fires if **either** model flags the window → `alert_source` shows `xgboost`, `iforest`, or `both`.
 
-# Replay captured messages
-docker compose exec client python -m attacks.replay --target-service HVAC --count 10
+### Key Detection Features
 
-# Spoof a service offer
-docker compose exec client python -m attacks.spoofed_offer --service HVAC --duration 15
+The detector addresses several design challenges:
 
-# Send malformed SD packets
-docker compose exec client python -m attacks.malformed_sd --count 20
-```
+- **Synthetic attack seeding** — Before any real attacks arrive, the model is pre-trained on ~25+ synthetic attack feature profiles (flood, replay, spoof, evasion) so it can detect attacks from the first window
+- **Live retraining** — Model retrains every 60 seconds on the full accumulated traffic log, improving accuracy over time
+- **Delayed training** — Waits up to 90 seconds at startup for real attack data to appear before initial training
+- **5-second scoring windows** — Wider than typical 2s windows to capture enough attack signal per scoring cycle
 
-### 4. Train the Detector
+### 14 Features Per Window
 
-After running normal traffic + attacks for a few minutes:
+| Feature | What it captures |
+|:---|:---|
+| `msg_count` | Total messages in window |
+| `msg_rate` | Messages per second |
+| `unique_services` | Number of distinct service IDs |
+| `unique_methods` | Number of distinct method IDs |
+| `unique_sessions` | Session ID diversity |
+| `session_id_entropy` | Shannon entropy (replay detection) |
+| `sd_offer_count` | SD Offer messages (spoofing detection) |
+| `sd_offer_rate` | SD Offers per second |
+| `mean_payload_size` | Average payload bytes |
+| `std_payload_size` | Payload size variation |
+| `request_response_ratio` | Unanswered request detection |
+| `notification_ratio` | Event traffic fraction |
+| `unique_src_ips` | Source IP diversity |
+| `max_burst_rate` | Peak instantaneous rate (100ms buckets) |
 
-```bash
-pip install xgboost scikit-learn pandas numpy
-python -m detector.train_model --log-path logs/traffic.jsonl
-```
+---
 
-### 5. Start the Dashboard
+## Attack Types
 
-Uncomment the `dashboard` and `detector` services in `docker-compose.yml`, then:
+The simulator injects 4 types of attacks automatically:
 
-```bash
-docker compose up --build dashboard detector
-```
+| Attack | Technique | Injected count | Detection signal |
+|:---|:---|:---|:---|
+| 🔴 **Flood** | 50 rapid requests at ~200 msg/s | 50 msgs/burst | High msg_count, max_burst_rate |
+| 🟠 **Replay** | Stale session IDs (always 0x0001) | 8 msgs/burst | Low unique_sessions, low entropy |
+| 🟣 **Spoofed Offer** | Fake SD service announcements | 5 msgs/burst | High sd_offer_count, notification_ratio |
+| 💗 **Evasion** | Slow flood across 3 services | 12 msgs/burst | Unusual src_ip, request_response_ratio |
 
-Open http://localhost:8501 to see the live dashboard.
+The dashboard sidebar also has buttons to **manually trigger** any attack type on demand.
+
+---
+
+## Dashboard
+
+The Streamlit dashboard at http://localhost:8501 includes:
+
+- **Alert banner** — Green (normal) / Red (attack detected) with model source
+- **Metrics row** — Total messages, active services, attack count, alerts fired
+- **XGBoost score graph** — Time series with 0.5 threshold line
+- **Isolation Forest score graph** — Time series with -0.02 threshold line
+- **Network topology** — Interactive visualization of ECU connections
+- **Live traffic feed** — Color-coded scrolling table of recent messages
+- **Attack launcher sidebar** — Buttons to inject flood, replay, spoof, evasion attacks
 
 ---
 
@@ -116,34 +173,40 @@ Open http://localhost:8501 to see the live dashboard.
 
 ```
 someip-ids/
-├── proto/              # SOME/IP protocol library (pure Python)
-│   ├── someip.py       # 16-byte header codec
-│   ├── sd.py           # Service Discovery messages
-│   └── constants.py    # Service/method/event IDs
-├── services/           # Simulated ECU services
-│   ├── base_service.py # Abstract service base class
-│   ├── hvac.py         # HVAC: SetTemperature, GetTemperature
-│   ├── media.py        # Media: Play, Pause, NextTrack
-│   └── navigation.py   # Navigation: SetDestination
-├── client/             # Head-unit client
-│   ├── discovery.py    # SD listener + service registry
-│   ├── head_unit.py    # Method caller + event subscriber
-│   └── traffic_logger.py # JSON-lines traffic logging
-├── attacks/            # Attack scripts
-│   ├── replay.py       # Message replay (stale session IDs)
-│   ├── flood.py        # High-rate request flooding
-│   ├── spoofed_offer.py # Fake SD Offer impersonation
-│   └── malformed_sd.py # Invalid/garbage SD packets
-├── detector/           # ML-based anomaly detection
-│   ├── feature_extractor.py # Sliding-window features
-│   ├── train_model.py  # XGBoost training pipeline
-│   ├── detector.py     # Real-time scoring loop
-│   └── model/          # Saved model artifacts
-├── dashboard/          # Streamlit visualization
-│   └── app.py          # Live 3-panel dashboard
-├── tests/              # Automated tests
-├── docker-compose.yml  # Container orchestration
-└── .github/workflows/  # CI pipeline
+├── run_local.py           # ⭐ Main entry point — runs full pipeline locally
+├── demo.py                # Offline demo — all 8 stages in terminal
+├── proto/                 # SOME/IP protocol library (pure Python)
+│   ├── someip.py          # 16-byte header codec
+│   ├── sd.py              # Service Discovery + HMAC signing
+│   └── constants.py       # Service/method/event IDs + HMAC keys
+├── services/              # Simulated ECU services
+│   ├── base_service.py    # Abstract base (session tracking, logging)
+│   ├── hvac.py            # HVAC: SetTemperature, GetTemperature
+│   ├── media.py           # Media: Play, Pause, NextTrack
+│   └── navigation.py      # Navigation: SetDestination
+├── client/                # Head-unit client
+│   ├── discovery.py       # SD listener + service registry
+│   ├── head_unit.py       # Method caller + event subscriber
+│   └── traffic_logger.py  # JSON-lines traffic logging
+├── attacks/               # Attack scripts (for Docker mode)
+│   ├── replay.py          # Message replay
+│   ├── flood.py           # Request flooding
+│   ├── spoofed_offer.py   # Fake SD Offers
+│   └── malformed_sd.py    # Invalid SD packets
+├── detector/              # ML-based anomaly detection
+│   ├── feature_extractor.py # 14 sliding-window features
+│   ├── detector.py        # Real-time scoring loop (Docker mode)
+│   ├── isolation_forest.py # IForest training utilities
+│   ├── train_model.py     # XGBoost training pipeline
+│   └── model/             # Saved model artifacts
+├── dashboard/             # Streamlit visualization
+│   ├── app.py             # Live dashboard + attack launcher
+│   └── topology.py        # Network topology canvas
+├── local_logs/            # Runtime traffic + alert logs
+├── tests/                 # Automated tests
+├── docker-compose.yml     # Container orchestration
+├── requirements.txt       # Python dependencies
+└── .github/workflows/     # CI pipeline
 ```
 
 ## SOME/IP Protocol
@@ -164,42 +227,29 @@ This project implements a faithful subset of the AUTOSAR SOME/IP specification:
 | 15 | 8b | Return Code |
 
 ### Service Discovery
-- **OfferService** — ECU announces availability (broadcast, every 3s)
+- **OfferService** — ECU announces availability (broadcast)
 - **FindService** — Client queries for a service
 - **SubscribeEventgroup** — Client subscribes to events
 - **SubscribeEventgroupAck** — Server confirms subscription
+- **HMAC signing** — Offers are signed with per-service HMAC-SHA256 keys
 
-## Detection Features
+---
 
-14 features extracted per 2-second window:
+## Detector HTTP API
 
-| Feature | What it captures |
+When running, the detector exposes a REST API on port 5001:
+
+| Endpoint | Response |
 |:---|:---|
-| `msg_count` | Total messages |
-| `msg_rate` | Messages per second |
-| `unique_services` | Number of distinct services |
-| `unique_methods` | Number of distinct methods |
-| `unique_sessions` | Session ID diversity |
-| `session_id_entropy` | Shannon entropy (replay detection) |
-| `sd_offer_count` | SD Offer messages (spoofing detection) |
-| `sd_offer_rate` | SD Offers per second |
-| `mean_payload_size` | Average payload bytes |
-| `std_payload_size` | Payload size variation |
-| `request_response_ratio` | Unanswered request detection |
-| `notification_ratio` | Event traffic fraction |
-| `unique_src_ips` | Source IP diversity |
-| `max_burst_rate` | Peak instantaneous rate |
+| `GET /status` | Full detector state (scores, alerts, features, service stats, model version) |
+| `GET /health` | `OK` |
 
-## Limitations & Future Work
+Example:
+```bash
+curl http://localhost:5001/status | python -m json.tool
+```
 
-> This project proves the **pipeline** works — simulated ECU → attack → detect → visualize. It does **not** prove the detector would catch a real, unseen attacker on production hardware.
-
-**What a production version would need:**
-- Real ECU traffic captures (CAN/SOME/IP gateway logs from actual vehicles)
-- Broader attack coverage (fuzzing, protocol-level exploits, MITM)
-- Latency constraints for embedded deployment (SOME/IP runs on ARM ECUs)
-- AUTOSAR-compliant vsomeip integration instead of pure Python
-- Adversarial robustness testing (attacks designed to evade the detector)
+---
 
 ## Running Tests
 
@@ -213,6 +263,19 @@ python -m pytest tests/test_proto.py -v
 # Just detector tests
 python -m pytest tests/test_detector.py -v
 ```
+
+---
+
+## Limitations & Future Work
+
+> This project proves the **pipeline** works — simulated ECU → attack → detect → visualize. It does **not** prove the detector would catch a real, unseen attacker on production hardware.
+
+**What a production version would need:**
+- Real ECU traffic captures (CAN/SOME/IP gateway logs from actual vehicles)
+- Broader attack coverage (fuzzing, protocol-level exploits, MITM)
+- Latency constraints for embedded deployment (SOME/IP runs on ARM ECUs)
+- AUTOSAR-compliant vsomeip integration instead of pure Python
+- Adversarial robustness testing (attacks designed to evade the detector)
 
 ## License
 
